@@ -46008,7 +46008,7 @@ setModel(buildSample(), 'サンプル部屋');
       <div class="btns">
         <button class="primary" id="btnOpen">ファイルを開く</button>
         <input type="file" id="file" accept=".glb,.gltf" multiple class="hidden">
-        <button id="btnExportTop">PNG出力</button>
+        <button id="btnExportTop">PNG・PDF出力</button>
       </div>
       <div class="info" id="modelInfo">モデル未読込</div>
     </header>
@@ -46131,8 +46131,25 @@ setModel(buildSample(), 'サンプル部屋');
     </details>
 
     <details open>
-      <summary>PNG 出力</summary>
+      <summary>PNG・PDF 出力</summary>
       <div class="sec">
+        <div class="srow" style="grid-template-columns:78px 1fr">
+          <label>形式</label>
+          <select id="expFmt">
+            <option value="png" selected>PNG（画像）</option>
+            <option value="pdf">PDF</option>
+          </select>
+        </div>
+        <div class="srow hidden" id="paperRow" style="grid-template-columns:78px 1fr">
+          <label>用紙</label>
+          <select id="expPaper">
+            <option value="A3L" selected>A3 横</option>
+            <option value="A4L">A4 横</option>
+            <option value="A3P">A3 縦</option>
+            <option value="A4P">A4 縦</option>
+            <option value="fit">画像の大きさのまま（余白なし）</option>
+          </select>
+        </div>
         <div class="srow" style="grid-template-columns:78px 1fr">
           <label>サイズ</label>
           <select id="expPreset">
@@ -46154,6 +46171,7 @@ setModel(buildSample(), 'サンプル部屋');
         <div class="crow"><label><input type="checkbox" id="chkTransparent">背景を透過</label></div>
         <div class="crow"><label><input type="checkbox" id="chkExpGrid">グリッドも出力に含める</label></div>
         <button class="primary wide" id="btnExport">PNG を出力</button>
+        <div class="note" id="pdfNote" style="display:none">PDFは用紙に画像を収め、下にモデル名と日付を入れます。用紙に合わせるときは、サイズを「画面と同じ比率 ×3」以上にすると印刷がきれいです。</div>
         <div class="note">画面と比率が違うサイズでは、縦の画角を保ったまま左右の写る範囲が変わります。断面ガイド線は出力に含まれません。</div>
       </div>
     </details>
@@ -50489,12 +50507,24 @@ async function exportPNG() {
     camera.updateMatrixWorld();
     updateCamPlane(camera);
     renderer.render(scene, camera);
-    const blob = await new Promise(r => renderer.domElement.toBlob(r, 'image/png'));
-    if (!blob) throw new Error('画像を生成できませんでした（サイズを小さくしてください）');
     const ts = new Date(); const pad = n => String(n).padStart(2, '0');
-    lastName = `${modelName}_${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}_${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}.png`;
-    lastBlob = blob;
-    showPreview(blob, w, h);
+    const stamp = `${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}_${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}`;
+    if ($('expFmt').value === 'pdf') {
+      const page = makePdfPage(renderer.domElement, $('expPaper').value, ts);
+      const jb = await new Promise(r => page.canvas.toBlob(r, 'image/jpeg', 0.92));
+      if (!jb) throw new Error('PDFを作成できませんでした（サイズを小さくしてください）');
+      const pdf = jpegToPdf(new Uint8Array(await jb.arrayBuffer()), page.canvas.width, page.canvas.height, page.wMm, page.hMm);
+      const prev = await new Promise(r => page.canvas.toBlob(r, 'image/jpeg', 0.8));
+      lastName = `${modelName}_${stamp}.pdf`;
+      lastBlob = pdf;
+      showPreview(prev, w, h, pdf, page.label);
+    } else {
+      const blob = await new Promise(r => renderer.domElement.toBlob(r, 'image/png'));
+      if (!blob) throw new Error('画像を生成できませんでした（サイズを小さくしてください）');
+      lastName = `${modelName}_${stamp}.png`;
+      lastBlob = blob;
+      showPreview(blob, w, h);
+    }
   } catch (e) {
     toast(String(e.message || e));
   } finally {
@@ -50505,12 +50535,71 @@ async function exportPNG() {
     exporting = false;
   }
 }
+
+// ---------- PDF ----------
+const PDF_PAPERS = { A4L: [297, 210, 'A4横'], A3L: [420, 297, 'A3横'], A4P: [210, 297, 'A4縦'], A3P: [297, 420, 'A3縦'] };
+function makePdfPage(src, paper, date) {
+  const FONT = '"Hiragino Sans","BIZ UDPGothic","Yu Gothic","Noto Sans JP",sans-serif';
+  if (paper === 'fit' || !PDF_PAPERS[paper]) {
+    // 画像そのままの大きさ（200dpi換算）
+    const c = document.createElement('canvas'); c.width = src.width; c.height = src.height;
+    const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height); x.drawImage(src, 0, 0);
+    return { canvas: c, wMm: src.width / 200 * 25.4, hMm: src.height / 200 * 25.4, label: '画像サイズ' };
+  }
+  const [PW, PH, label] = PDF_PAPERS[paper];
+  let d = 250 / 25.4;
+  d *= Math.min(1, Math.sqrt(16e6 / (PW * d * PH * d)));
+  const c = document.createElement('canvas'); c.width = Math.round(PW * d); c.height = Math.round(PH * d);
+  const x = c.getContext('2d');
+  x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
+  x.setTransform(d, 0, 0, d, 0, 0);
+  const M = 10, FOOT = 9, aw = PW - 2 * M, ah = PH - 2 * M - FOOT;
+  const sc = Math.min(aw / src.width, ah / src.height), iw = src.width * sc, ih = src.height * sc;
+  x.imageSmoothingQuality = 'high';
+  x.drawImage(src, M + (aw - iw) / 2, M + (ah - ih) / 2, iw, ih);
+  x.strokeStyle = '#111'; x.lineWidth = 0.25;
+  x.beginPath(); x.moveTo(M, PH - M - FOOT + 1); x.lineTo(PW - M, PH - M - FOOT + 1); x.stroke();
+  x.fillStyle = '#111'; x.textBaseline = 'middle';
+  x.font = `600 3.6px ${FONT}`; x.textAlign = 'left';
+  x.fillText(`${modelName}　断面パース`, M, PH - M - FOOT / 2 + 0.5);
+  x.font = `3px ${FONT}`; x.textAlign = 'right';
+  x.fillText(`${label}　${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`, PW - M, PH - M - FOOT / 2 + 0.5);
+  return { canvas: c, wMm: PW, hMm: PH, label };
+}
+function jpegToPdf(jpegBytes, pxW, pxH, wMm, hMm) {
+  const W = (wMm * 72 / 25.4).toFixed(2), H = (hMm * 72 / 25.4).toFixed(2), enc = new TextEncoder(), parts = [], offs = [];
+  let len = 0;
+  const push = b => { if (typeof b === 'string') b = enc.encode(b); parts.push(b); len += b.length; };
+  const obj = (n, body, stream) => { offs[n] = len; push(`${n} 0 obj\n${body}`); if (stream) { push('\nstream\n'); push(stream); push('\nendstream'); } push('\nendobj\n'); };
+  push('%PDF-1.4\n');
+  obj(1, '<< /Type /Catalog /Pages 2 0 R >>');
+  obj(2, '<< /Type /Pages /Kids [3 0 R] /Count 1 >>');
+  obj(3, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /XObject << /Im0 4 0 R >> /ProcSet [/PDF /ImageC] >> /Contents 5 0 R >>`);
+  obj(4, `<< /Type /XObject /Subtype /Image /Width ${pxW} /Height ${pxH} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpegBytes.length} >>`, jpegBytes);
+  const content = `q ${W} 0 0 ${H} 0 0 cm /Im0 Do Q`;
+  obj(5, `<< /Length ${content.length} >>`, enc.encode(content));
+  const xref = len; let t = 'xref\n0 6\n0000000000 65535 f \n';
+  for (let i = 1; i <= 5; i++) t += String(offs[i]).padStart(10, '0') + ' 00000 n \n';
+  push(t + `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+  const out = new Uint8Array(len); let q = 0; parts.forEach(b => { out.set(b, q); q += b.length; });
+  return new Blob([out], { type: 'application/pdf' });
+}
+function syncFmtUI() {
+  const pdf = $('expFmt').value === 'pdf';
+  $('paperRow').classList.toggle('hidden', !pdf);
+  $('pdfNote').style.display = pdf ? '' : 'none';
+  $('btnExport').textContent = pdf ? 'PDF を出力' : 'PNG を出力';
+  $('chkTransparent').disabled = pdf;
+}
+
 let previewURL = null;
-function showPreview(blob, w, h) {
+function showPreview(blob, w, h, fileBlob, label) {
   if (previewURL) URL.revokeObjectURL(previewURL);
   previewURL = URL.createObjectURL(blob);
   $('previewImg').src = previewURL;
-  $('previewInfo').textContent = `${lastName}　${w}×${h}px　${blob.size >= 1048576 ? (blob.size / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(blob.size / 1024)) + ' KB'}`;
+  const fb = fileBlob || blob;
+  $('previewInfo').textContent = `${lastName}　${label ? label + '　' : ''}${w}×${h}px　${fb.size >= 1048576 ? (fb.size / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(fb.size / 1024)) + ' KB'}`;
+  $('previewNote').style.display = fileBlob ? 'none' : '';
   $('modal').style.display = 'flex';
 }
 async function getDownloads() {
@@ -50533,8 +50622,10 @@ async function saveLast() {
   }
   try {
     const a = document.createElement('a');
-    a.href = previewURL; a.download = lastName;
+    const url = URL.createObjectURL(lastBlob);
+    a.href = url; a.download = lastName;
     document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
     toast('ダウンロードを開始しました');
   } catch (e) {
     toast('この環境では直接保存できません。画像を右クリックして保存してください');
@@ -50962,6 +51053,7 @@ $('btnSaveView').onclick = () => {
 $('expPreset').onchange = updateExpInfo;
 $('expW').oninput = updateExpInfo; $('expH').oninput = updateExpInfo;
 $('btnExport').onclick = exportPNG;
+$('expFmt').onchange = syncFmtUI;
 $('btnExportTop').onclick = exportPNG;
 $('btnModalClose').onclick = () => { $('modal').style.display = 'none'; };
 $('btnModalSave').onclick = saveLast;
@@ -51033,7 +51125,7 @@ var MODES = [
   {id:'merge', no:'1', label:'合成', sub:'室内＋屋外', title:'スキャン合成', what:'室内スキャンと屋外スキャンを1つにする',
    items:['床を水平にそろえる','対応点・自動フィッティングで位置合わせ','合成GLB / STL、断面線DXF、画像＋記録のPNG・PDF'], fmt:'STL・GLB・OBJ・PLY（2つ）'},
   {id:'section', no:'2', label:'確認', sub:'断面パース', title:'断面パース', what:'全体を見て、切って、画像にする',
-   items:['壁2点で軸合わせ（平面CADと同じ方法）','断面ボックス・任意角度の断面','手前の壁・天井をクリックで隠す','視点を保存、A3/4K などでPNG出力'], fmt:'GLB（STL等は自動でGLBに変換）'},
+   items:['壁2点で軸合わせ（平面CADと同じ方法）','断面ボックス・任意角度の断面','手前の壁・天井をクリックで隠す','視点を保存、A3/4K などでPNG・PDF出力'], fmt:'GLB（STL等は自動でGLBに変換）'},
   {id:'bm', no:'3', label:'測る', sub:'BMレベル', title:'BMレベル測定', what:'基準点（BM）からの高さと距離を測る',
    items:['クリックでBM±0を指定','各点の BM+### を一覧に記録','2点間の距離、表をコピー／画像＋一覧のPNG・PDF'], fmt:'STL・OBJ・DAE・GLB'},
   {id:'draw', no:'4', label:'図面化', sub:'平面CAD・展開図', title:'図面化', what:'平面図をなぞってDXF、壁を展開図に',
